@@ -1,0 +1,261 @@
+// Functions to calculate spectral indices
+// The formula for each index was obtained from:
+// https://custom-scripts.sentinel-hub.com/custom-scripts/sentinel-2/indexdb/
+
+var scale = 0.0001; // Global scaling factor for image calculations
+
+// Compute the DATT1 index
+
+function datt1_fn(image){
+  
+  var datt1_cal = image.expression("(REDGE4-REDGE1)/(REDGE4-RED)*100",
+  {"RED":image.select("B4").multiply(scale),
+  "REDGE1":image.select("B5").multiply(scale),
+  "REDGE4":image.select("B8A").multiply(scale)}).rename("DATT1");
+  
+  return image.addBands(datt1_cal);
+}
+
+// Compute the IRECI index
+
+function ireci_fn(image){
+  
+  var ireci_cal = image.expression("(REDGE3-RED)/(REDGE1/REDGE2)*100",
+  {"RED":image.select("B4").multiply(scale),"REDGE1":image.select("B5").multiply(scale),
+    "REDGE2":image.select("B6").multiply(scale),"REDGE3":image.select("B7").multiply(scale)
+  }).rename("IRECI");
+  
+  return image.addBands(ireci_cal);
+  
+}
+
+// Compute the NBR2 index
+
+function nbr2_fn(image){
+  
+  var nbr2_cal = image.expression("(SWIR1-SWIR2)/(SWIR1+SWIR2)*100",
+  {"SWIR1":image.select("B11").multiply(scale),
+    "SWIR2":image.select("B12").multiply(scale)}).rename("NBR2");
+    
+  return image.addBands(nbr2_cal);
+  
+}
+
+// Compute the NDRE index
+
+function ndre_fn(image){
+  
+  var ndre_cal = image.expression("(REDGE3-REDGE1)/(REDGE3+REDGE1)*100",
+  {"REDGE1":image.select("B5").multiply(scale),
+  "REDGE3":image.select("B7").multiply(scale)}).rename("NDRE");
+  
+  return image.addBands(ndre_cal);
+  
+}
+
+// Compute the NDVI index
+
+function ndvi_fn(image){
+  
+  var ndvi_cal = image.expression("(NIR-RED)/(NIR+RED)*100",
+  {"NIR":image.select("B8").multiply(scale),
+    "RED":image.select("B4").multiply(scale)}).rename("NDVI");
+  
+  return image.addBands(ndvi_cal);
+  
+}
+
+// Compute the NDWI index
+
+function ndwi_fn(image){
+  
+  var ndwi_cal = image.expression("(GREEN-NIR)/(GREEN+NIR)*100",
+  {"GREEN":image.select("B3").multiply(scale),
+  "NIR":image.select("B8").multiply(scale)}).rename("NDWI");
+      
+  return image.addBands(ndwi_cal);
+  
+}
+
+// Apply cloud masking to the image
+// SELECTING PIXELS that are Vegetation (4) or Bare Soils (5) or Water (6) or 
+// has Clouds Low Probability / unclassified (7).
+// EXCLUDING PIXELS that are: Saturated or defective (1), Dark area pixels (2), 
+// Cloud shadows (3), Clouds medium probability (8), Clouds high probability (9), 
+// Cirrus (10), Snow / Ice (10)
+
+function cloud_masking_fn(image){
+  
+  var scl = image.select("SCL");
+  
+  var mask = scl.eq(4).or(scl.eq(5)).or(scl.eq(6)).or(scl.eq(7));
+  
+  return image.updateMask(mask);
+  
+}
+
+// Clip the image using the specified geometry
+
+function clip_img_fn (geometry){
+  
+  function clip_img2_fn(image){return image.clip(geometry)} 
+  
+  return clip_img2_fn;
+}
+
+// Extract time series data for the given image and geometries
+
+function extract_timeseries_fn (image,geometries){
+  
+  var img_geo_reduce = image.reduceRegions({
+    collection: geometries,
+    reducer: ee.Reducer.first(),
+    tileScale: 2
+  });
+  
+  return img_geo_reduce.map(function(geometry){
+      
+    var dict = ee.Dictionary(geometry.get("first"));
+    geometry = geometry.setGeometry(null);
+    return(geometry);
+      
+  });
+}
+
+// List unique dates for the image collection within the specified date range
+
+function dates_ls_fn(col,start,end) {
+  
+  var filtered = col.filterDate(start,end);
+
+  return ee.List(filtered.toList(filtered.size())
+  
+    .map(function(img){
+      
+      return ee.Image(img).date().format("YYYY-MM-dd");
+      
+    }
+    
+  )).distinct();
+  
+}
+
+// Define feature collection for train and test datasets
+// The path "users/adriancal77/GEO_AI_Challenge/Train_Afghanistan" must be change by the path where
+// Train_Afghanistan, Test_Afghanistan, Train_Iran_Sudan, Test_Iran_Sudan are present.
+
+var train_afgha = ee.FeatureCollection("users/adriancal77/GEO_AI_Challenge/Train_Afghanistan");
+
+var test_afgha = ee.FeatureCollection("users/adriancal77/GEO_AI_Challenge/Test_Afghanistan");
+
+var train_iran_sudan = ee.FeatureCollection("users/adriancal77/GEO_AI_Challenge/Train_Iran_Sudan");
+
+var test_iran_sudan = ee.FeatureCollection("users/adriancal77/GEO_AI_Challenge/Test_Iran_Sudan");
+
+// Define the Sentinel-2 Surface Reflectance collection
+
+var s2=ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED'); //.filterBounds(farms);
+
+// Define the date range for Iran and Sudan
+
+var start_date_iran_sudan = ee.Date("2019-07-01");
+var end_date_iran_sudan = ee.Date("2020-07-01");
+
+// Define the date range for Afghanistan
+
+var start_date_afgha = ee.Date("2022-07-01");
+var end_date_afgha = ee.Date("2023-07-01");
+
+// Main function to extract and export multi-indices for the specified dataset, country, and date range
+
+function exportMultiIndices(farms, dataset, country, start_date, end_date) {
+  
+  if (start_date >= end_date) {
+        throw new Error("Start date should be before end date");
+  }
+  
+  var months = end_date.difference(start_date,'month').round();
+  
+  var dates_ls_fn = function(n) {
+    return start_date.advance(n,'month').format('YYYY-MM-dd');
+  };
+
+  var dates = ee.List.sequence(0, months, ee.Number(1).divide(3)).map(dates_ls_fn);
+
+  var nr_dates = dates.size().getInfo();
+
+  // Iterate over the date range and compute spectral indices for each image 
+  
+  var datt1_ls = [];
+  var ireci_ls = [];
+  var nbr2_ls = [];
+  var ndre_ls = [];
+  var ndvi_ls = [];
+  var ndwi_ls = [];
+  
+  for(var cont=0;cont<(nr_dates-1);cont++){
+    
+    var img = s2.filterDate(dates.get(cont),dates.get(cont+1)).map(cloud_masking_fn).map(clip_img_fn(farms));
+    
+    ndvi_ls.push(img.map(ndvi_fn).select("NDVI").qualityMosaic("NDVI"));
+    ndre_ls.push(img.map(ndre_fn).select("NDRE").qualityMosaic("NDRE"));
+    nbr2_ls.push(img.map(nbr2_fn).select("NBR2").qualityMosaic("NBR2"));
+    datt1_ls.push(img.map(datt1_fn).select("DATT1").qualityMosaic("DATT1"));
+    ireci_ls.push(img.map(ireci_fn).select("IRECI").qualityMosaic("IRECI"));
+    ndwi_ls.push(img.map(ndwi_fn).select("NDWI").qualityMosaic("NDWI"));
+    
+  }
+  
+  var ndvi_mb = ee.ImageCollection(ndvi_ls).toBands();
+  var ndre_mb = ee.ImageCollection(ndre_ls).toBands();
+  var nbr2_mb = ee.ImageCollection(nbr2_ls).toBands();
+  var datt1_mb = ee.ImageCollection(datt1_ls).toBands();
+  var ireci_mb = ee.ImageCollection(ireci_ls).toBands();
+  var ndwi_mb = ee.ImageCollection(ndwi_ls).toBands();
+  
+  // Reprojection to EPSG:3857
+  
+  var epsg = "EPSG:3857";
+  
+  var multi_indices = ndvi_mb.addBands([ndre_mb,nbr2_mb,datt1_mb,ireci_mb,ndwi_mb]);
+  multi_indices = multi_indices.reproject(epsg,null,10);
+  
+  // Rename images
+  
+  function pad_number_fn(number_string) {
+    
+    var number = ee.Number.parse(number_string);
+    return number.format('%02d');
+  
+  }
+  
+  var old_band_names = multi_indices.bandNames();
+  
+  var new_band_names = old_band_names.map(function(name) {
+    var parts = ee.String(name).split('_');
+    var number_part = pad_number_fn(parts.get(0));
+    var text_part = parts.get(1);
+    return number_part.cat('_').cat(text_part);
+  });
+  
+  var renamed_images = multi_indices.rename(new_band_names);
+  
+  // Time series extraction by point
+  
+  var multi_indices_tbl = extract_timeseries_fn(renamed_images,farms);
+
+  // Table exportation to Google Drive
+  
+  Export.table.toDrive({
+    collection: ee.FeatureCollection(multi_indices_tbl),
+    description: "S2_"+dataset+"_MULTI_INDICES_"+country,
+    fileFormat: "CSV"
+  });
+}
+
+// Extract indices times seris by country and train/test
+
+exportMultiIndices(train_afgha, "TRAIN", "AFGHANISTAN", start_date_afgha, end_date_afgha);
+exportMultiIndices(test_afgha, "TEST", "AFGHANISTAN", start_date_afgha, end_date_afgha);
+exportMultiIndices(train_iran_sudan, "TRAIN", "IRAN_SUDAN", start_date_iran_sudan, end_date_iran_sudan);
+exportMultiIndices(test_iran_sudan, "TEST", "IRAN_SUDAN", start_date_iran_sudan, end_date_iran_sudan);
